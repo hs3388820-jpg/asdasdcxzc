@@ -45,7 +45,7 @@ jobs:
               sleep 10
             done
           '
-          sleep 15
+          sleep 20
           docker exec android-container adb devices
 
       # ── Step 4: Enable Root ──
@@ -55,161 +55,167 @@ jobs:
           docker exec android-container adb root
           sleep 5
           docker exec android-container adb shell "id"
-          docker exec android-container adb shell "whoami"
-          echo ""
-          echo "✅ Root confirmed! You have full root access."
+          echo "✅ Root confirmed!"
 
-      # ── Step 5: Install Google Play Store ──
+      # ── Step 5: Remount system and reboot ──
+      - name: Remount system partition
+        run: |
+          echo "🔧 Remounting system as writable..."
+          docker exec android-container adb root
+          sleep 3
+          docker exec android-container adb shell "avbctl disable-verification" 2>/dev/null || true
+          docker exec android-container adb disable-verity 2>/dev/null || true
+          docker exec android-container adb reboot
+          
+          echo "⏳ Waiting for reboot..."
+          sleep 30
+          
+          timeout 300 bash -c '
+            while true; do
+              STATUS=$(docker exec android-container adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")
+              if [ "$STATUS" = "1" ]; then
+                echo "✅ Rebooted!"
+                break
+              fi
+              echo "Still rebooting..."
+              sleep 10
+            done
+          '
+          sleep 10
+          
+          docker exec android-container adb root
+          sleep 3
+          docker exec android-container adb remount
+          sleep 5
+          echo "✅ System is now writable!"
+          
+          # Verify writable
+          docker exec android-container adb shell "touch /system/test_write && rm /system/test_write && echo 'System is writable!'" || echo "Using alternative install method"
+
+      # ── Step 6: Install Google Play Store + Services ──
       - name: Install Google Play Store
         run: |
-          echo "📦 Downloading OpenGApps Pico..."
-
-          # Method 1: Try NikGapps (most reliable for Android 14)
           docker exec android-container bash -c '
-            apt-get update && apt-get install -y unzip wget 2>/dev/null || true
-
-            # Download NikGapps core package
             cd /tmp
-
-            # Install using individual APKs method (most reliable)
-            echo "📥 Downloading Play Store APKs..."
-
-            # Google Services Framework
-            wget -q "https://github.com/nicholasgasior/gapps/releases/download/v1/GoogleServicesFramework.apk" -O GSF.apk 2>/dev/null || true
-
-            # Download from APKMirror alternatives
-            # Using microG + Play Store combo
-
-            # Install Google Play Store via pre-built system image method
+            
+            echo "📥 Downloading Google Play Store and Services..."
+            
+            # Download Play Store (Phonesky)
+            wget -q --no-check-certificate \
+              "https://raw.githubusercontent.com/nicholasgasior/gapps/main/Phonesky.apk" \
+              -O Phonesky.apk 2>/dev/null || true
+            
+            # Try system install first, fall back to regular install
             adb root
-            adb remount
-
-            # Create necessary directories
-            adb shell "mkdir -p /system/priv-app/GmsCore"
-            adb shell "mkdir -p /system/priv-app/Phonesky"
-            adb shell "mkdir -p /system/priv-app/GoogleServicesFramework"
-          '
-
-          # Simpler reliable method - Aurora Store (uses real Google Play catalog)
-          echo "📥 Installing Aurora Store (accesses Google Play catalog)..."
-          docker exec android-container bash -c '
-            cd /tmp
-            wget -q "https://auroraoss.com/downloads/AuroraStore/Release/AuroraStore_4.6.1.apk" -O aurora.apk 2>/dev/null || \
-            wget -q "https://f-droid.org/repo/com.aurora.store_58.apk" -O aurora.apk 2>/dev/null
-
-            if [ -f aurora.apk ]; then
-              adb install aurora.apk
-              echo "✅ Aurora Store installed!"
+            sleep 2
+            
+            echo "📦 Attempting system-level install..."
+            
+            # Method 1: Push to system (if writable)
+            adb shell "mkdir -p /system/priv-app/Phonesky" 2>/dev/null
+            if adb push Phonesky.apk /system/priv-app/Phonesky/Phonesky.apk 2>/dev/null; then
+              adb shell "chmod 644 /system/priv-app/Phonesky/Phonesky.apk"
+              echo "✅ Play Store installed to system!"
             else
-              echo "⚠️ Downloading from alternative source..."
-              wget -q "https://github.com/nicholasgasior/gapps/raw/main/AuroraStore.apk" -O aurora.apk 2>/dev/null
-              adb install aurora.apk 2>/dev/null
+              echo "⚠️ System install failed, using user install..."
+              adb install Phonesky.apk 2>/dev/null || true
             fi
           '
 
-          # Also install F-Droid as backup app store
-          echo "📥 Installing F-Droid..."
-          docker exec android-container bash -c '
-            cd /tmp
-            wget -q "https://f-droid.org/F-Droid.apk" -O fdroid.apk
-            adb install fdroid.apk
-            echo "✅ F-Droid installed!"
-          '
-
-      # ── Step 6: Install Real Google Play Services + Store ──
-      - name: Install GApps (Real Google Play)
+      # ── Step 7: Install Aurora Store (Guaranteed Google Play Access) ──
+      - name: Install Aurora Store + F-Droid
         run: |
           docker exec android-container bash -c '
-            adb root
-            sleep 3
-            adb remount 2>/dev/null || true
-
-            echo "📥 Setting up MicroG (Google Play Services replacement)..."
             cd /tmp
-
-            # MicroG - lightweight Google Play Services
-            wget -q "https://github.com/nicholasgasior/gapps/releases/download/v1/com.google.android.gms.apk" -O microg.apk 2>/dev/null
-
-            # Try installing GMS
-            if [ -f microg.apk ]; then
-              adb install microg.apk 2>/dev/null
-              echo "✅ MicroG installed"
+            adb root
+            sleep 2
+            
+            echo "📥 Downloading Aurora Store..."
+            
+            # Try multiple sources
+            wget -q --no-check-certificate \
+              "https://auroraoss.com/downloads/AuroraStore/Release/AuroraStore_4.6.1.apk" \
+              -O aurora.apk 2>/dev/null
+            
+            if [ ! -s aurora.apk ]; then
+              wget -q --no-check-certificate \
+                "https://f-droid.org/repo/com.aurora.store_58.apk" \
+                -O aurora.apk 2>/dev/null
             fi
-
-            # Install Phonesky (Play Store)
-            wget -q "https://github.com/nicholasgasior/gapps/releases/download/v1/Phonesky.apk" -O playstore.apk 2>/dev/null
-
-            if [ -f playstore.apk ]; then
-              adb push playstore.apk /system/priv-app/Phonesky/Phonesky.apk 2>/dev/null || \
-              adb install playstore.apk 2>/dev/null
-              echo "✅ Play Store installed"
+            
+            if [ -s aurora.apk ]; then
+              adb install aurora.apk && echo "✅ Aurora Store installed!" || echo "❌ Aurora install failed"
+            else
+              echo "⚠️ Could not download Aurora Store"
             fi
-
-            # Set permissions
-            adb shell "pm grant com.android.vending android.permission.INTERNET 2>/dev/null"
-            adb shell "settings put global package_verifier_enable 0"
-            adb shell "settings put secure install_non_market_apps 1"
-
+            
             echo ""
-            echo "📱 Installed apps:"
-            adb shell "pm list packages -3"
+            echo "📥 Downloading F-Droid..."
+            wget -q --no-check-certificate \
+              "https://f-droid.org/F-Droid.apk" \
+              -O fdroid.apk 2>/dev/null
+            
+            if [ -s fdroid.apk ]; then
+              adb install fdroid.apk && echo "✅ F-Droid installed!" || echo "❌ F-Droid install failed"
+            fi
+            
+            # Allow unknown sources
+            adb shell "settings put secure install_non_market_apps 1"
+            adb shell "settings put global package_verifier_enable 0"
+            
+            echo ""
+            echo "📱 All installed apps:"
+            adb shell "pm list packages -3" | sed "s/package://g"
           '
 
-      # ── Step 7: Create Cloudflare Tunnel (Public URL) ──
-      - name: Create public URL with Cloudflare Tunnel
+      # ── Step 8: Create Cloudflare Tunnel ──
+      - name: Create public URL
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
           chmod +x cloudflared
 
-          # Start tunnel in background and capture URL
           ./cloudflared tunnel --url http://localhost:6080 --no-autoupdate > /tmp/tunnel.log 2>&1 &
-          TUNNEL_PID=$!
 
-          # Wait for URL to appear
           echo "⏳ Creating tunnel..."
-          sleep 15
-
-          TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log | head -1)
+          
+          # Wait and extract URL
+          for i in $(seq 1 30); do
+            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
 
           echo ""
           echo "╔══════════════════════════════════════════════════════════╗"
-          echo "║                  🤖 ANDROID IS READY!                   ║"
+          echo "║              🤖 ANDROID IS READY!                       ║"
           echo "╠══════════════════════════════════════════════════════════╣"
           echo "║                                                          ║"
-          echo "║  📱 Open this URL in your browser:                       ║"
+          echo "║  📱 Open in your browser:                                ║"
           echo "║                                                          ║"
+          if [ -n "$TUNNEL_URL" ]; then
           echo "║  🔗 $TUNNEL_URL"
+          else
+          echo "║  ⚠️  URL not ready - check logs below                   ║"
+          cat /tmp/tunnel.log
+          fi
           echo "║                                                          ║"
           echo "║  🔓 Root: ENABLED                                        ║"
-          echo "║  🏪 App Store: Aurora Store + F-Droid                    ║"
+          echo "║  🏪 Aurora Store = Google Play apps                      ║"
           echo "║  ⏰ Session: Up to 6 hours                               ║"
           echo "║                                                          ║"
-          echo "║  Tips:                                                    ║"
-          echo "║  - Click 'Connect' on the noVNC page                    ║"
-          echo "║  - Use Aurora Store to download Play Store apps          ║"
-          echo "║  - F-Droid for open source apps                         ║"
+          echo "║  👉 Click 'Connect' on the noVNC page                   ║"
           echo "║                                                          ║"
           echo "╚══════════════════════════════════════════════════════════╝"
 
-          if [ -z "$TUNNEL_URL" ]; then
-            echo ""
-            echo "⚠️ Tunnel URL not captured yet. Check log:"
-            cat /tmp/tunnel.log
-          fi
-
-      # ── Step 8: Keep session alive ──
-      - name: Keep alive (6 hours max)
+      # ── Step 9: Keep alive ──
+      - name: Keep alive
         run: |
-          echo "✅ Android is running. Session active."
-          echo "⏰ Will auto-terminate after 6 hours."
-          echo ""
-          echo "To install APKs remotely, push to this repo and use adb commands."
-
-          # Keep alive loop with status updates
+          echo "✅ Android is running!"
           COUNTER=0
           while true; do
             sleep 300
             COUNTER=$((COUNTER + 1))
             echo "⏱️ Running for $((COUNTER * 5)) minutes..."
-            docker exec android-container adb shell "dumpsys battery" 2>/dev/null | head -3
           done
